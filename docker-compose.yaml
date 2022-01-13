@@ -1,0 +1,77 @@
+version: '3.6'
+
+services:
+  postgres:
+    image: postgres:14
+    restart: always
+    volumes:
+    - db_data:/var/lib/postgresql/data
+    environment:
+      POSTGRES_PASSWORD: postgrespassword
+
+
+  # DRIVER={ODBC Driver 17 for SQL Server};SERVER=msserver;Uid=SA;Pwd=testPassword123
+  msserver:
+    image: mcr.microsoft.com/mssql/server:2019-latest
+    ports:
+      - 1433:1433
+    environment:
+      SA_PASSWORD: "testPassword123"
+      ACCEPT_EULA: "Y"
+    volumes:
+    - ./mssql-scripts:/scripts/
+    # Credit: https://github.com/microsoft/mssql-docker/issues/11#issuecomment-725442078
+    command:
+          - /bin/bash
+          - -c 
+          - |
+            # Launch MSSQL and send to background
+            /opt/mssql/bin/sqlservr &
+            pid=$$!
+
+            # Wait for it to be available
+            echo "Waiting for MS SQL to be available ⏳"
+            /opt/mssql-tools/bin/sqlcmd -l 30 -S localhost -h-1 -V1 -U sa -P $$SA_PASSWORD -Q "SET NOCOUNT ON SELECT \"YAY WE ARE UP\" , @@servername"
+            is_up=$$?
+            while [ $$is_up -ne 0 ] ; do 
+              echo -e $$(date) 
+              /opt/mssql-tools/bin/sqlcmd -l 30 -S localhost -h-1 -V1 -U sa -P $$SA_PASSWORD -Q "SET NOCOUNT ON SELECT \"YAY WE ARE UP\" , @@servername"
+              is_up=$$?
+              sleep 5 
+            done
+
+            # Run every script in /scripts
+            # TODO set a flag so that this is only done once on creation, 
+            #      and not every time the container runs
+            for foo in /scripts/*.sql
+              do /opt/mssql-tools/bin/sqlcmd -U sa -P $$SA_PASSWORD -l 30 -e -i $$foo
+            done
+
+            # trap SIGTERM and send same to sqlservr process for clean shutdown
+            trap "kill -15 $$pid" SIGTERM
+
+            # Wait on the sqlserver process
+            wait $$pid
+            exit 0
+
+  graphql-engine:
+    image: hasura/graphql-engine:v2.1.1
+    ports:
+    - "8090:8080"
+    depends_on:
+    - "postgres"
+    restart: always
+    environment:
+      ## postgres database to store Hasura metadata
+      HASURA_GRAPHQL_DATABASE_URL: postgres://postgres:postgrespassword@postgres:5432/postgres
+      HASURA_GRAPHQL_METADATA_DATABASE_URL: postgres://postgres:postgrespassword@postgres:5432/postgres
+      HASURA_MSSQL_DATABASE_URL: DRIVER={ODBC Driver 17 for SQL Server};SERVER=msserver;Uid=my_readonly_user_example;Pwd=Password123!
+      ## enable the console served by server
+      HASURA_GRAPHQL_ENABLE_CONSOLE: "true" # set to "false" to disable console
+      ## enable debugging mode. It is recommended to disable this in production
+      HASURA_GRAPHQL_DEV_MODE: "true"
+      HASURA_GRAPHQL_ENABLED_LOG_TYPES: startup, http-log, webhook-log, websocket-log, query-log
+      ## uncomment next line to set an admin secret
+      # HASURA_GRAPHQL_ADMIN_SECRET: myadminsecretkey
+volumes:
+  db_data:
